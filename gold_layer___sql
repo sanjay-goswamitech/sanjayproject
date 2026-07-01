@@ -1,0 +1,154 @@
+/*
+database : integrate_db
+schema   : golden_mart
+table    : daily_sales_fact
+table    : gross_margin_fact
+table    : fact_iot_sensor
+*/
+
+-- database 
+use integrate_db;
+
+-- schema
+create schema if not exists integrate_db.golden_mart;
+use schema integrate_db.golden_mart;
+
+
+-- table : daily_sales_fact
+create or replace table integrate_db.golden_mart.daily_sales_fact (
+     report_date varchar, 
+     store_id varchar,  
+     city_store varchar, 
+     name_store varchar, 
+     region_store varchar, 
+     category  varchar,
+     total_revenue_generated float,  
+     total_units_sold  integer,  
+     total_transaction_done  integer, 
+     average_cart_size float,
+     total_unique_customers integer,  
+     date_updated timestamp
+);
+
+-- load daily_sales_fact from silver csv
+insert into integrate_db.golden_mart.daily_sales_fact
+select
+    date(transaction_ts) as report_date,
+    store_id,
+    store_city as city_store,  
+    store_name  as name_store,
+    store_region as region_store,
+    category,
+    sum(line_total) as total_revenue_generated,
+    sum(quantity) as total_units_sold,
+    count(transaction_id) as total_transaction_done,
+    sum(line_total) / count(transaction_id) as average_cart_size,
+    count(distinct customer_id) as total_unique_customers,
+    current_timestamp() as date_updated
+from integrate_db.staging.csv_raw_transaction
+group by  date(transaction_ts), store_id, store_city, store_name, store_region, category
+order by report_date, store_id, category;
+
+-- verify
+select * from integrate_db.golden_mart.daily_sales_fact;
+
+
+
+
+
+
+
+
+-- table : gross_margin_fact
+create or replace table gross_margin_fact (
+    store_name varchar, 
+    category varchar, 
+    total_revenue_generated integer, 
+    total_cost_generated integer, 
+    gross_profit float, 
+    gross_margin float, 
+    no_of_units_sold integer, 
+    total_unique_orders integer, 
+    date_updated timestamp
+);
+
+-- load into gross_margin_fact 
+insert into integrate_db.golden_mart.gross_margin_fact
+with csv_cte as (
+    select
+        store_id, store_name, category,
+        sum(line_total) as total_revenue,
+        sum(quantity) as units_sold
+    from integrate_db.staging.csv_raw_transaction
+    group by store_id, store_name, category
+),
+parquet_cte as (
+    select
+        store_id, category,
+        avg(unit_cost) as avg_unit_cost,
+        count(distinct order_id) as unique_orders
+    from integrate_db.staging.stg_parquet_order
+    group by store_id, category
+)
+select
+    c.store_name,
+    c.category,
+    c.total_revenue as total_revenue_generated,
+    p.avg_unit_cost * c.units_sold as total_cost_generated,
+    c.total_revenue - (p.avg_unit_cost * c.units_sold) as gross_profit,
+    (c.total_revenue - (p.avg_unit_cost * c.units_sold)) / c.total_revenue * 100  as gross_margin,
+    c.units_sold as no_of_units_sold,
+    p.unique_orders as total_unique_orders,
+    current_timestamp() as date_updated
+from csv_cte as c          
+join parquet_cte as p          
+on c.store_id = p.store_id
+and c.category = p.category;  
+
+select * from integrate_db.golden_mart.gross_margin_fact;
+
+
+
+
+
+
+
+
+
+
+-- table : fact_iot_sensor
+create or replace table integrate_db.golden_mart.fact_iot_sensor (
+    event_date date, 
+    store_id varchar, 
+    store_name varchar,  
+    avg_footfall float , 
+    avg_temp_c float , 
+    avg_humidity float , 
+    avg_weight_kg float , 
+    avg_power float, 
+    date_updated timestamp
+);
+
+-- load data into fact_iot_sensor
+insert into integrate_db.golden_mart.fact_iot_sensor
+select  
+    date(event_ts) as event_date, 
+    store_id, store_name,
+    avg(case when sensor_name = 'footfall' then sensor_value end) as avg_footfall,
+    avg(case when sensor_name = 'temp_c' then sensor_value end) as avg_temp_c,
+    avg(case when sensor_name = 'humidity_pct' then sensor_value end) as avg_humidity,
+    avg(case when sensor_unit = 'kg' then sensor_value end) as avg_weight_kg,
+    avg(case when sensor_name = 'power_kw' then sensor_value end) as avg_power, 
+    current_timestamp() as date_updated
+from integrate_db.staging.stg_json_sensor
+group by date(event_ts), store_id, store_name
+order by event_date, store_id;
+
+-- view the data 
+select * from integrate_db.golden_mart.fact_iot_sensor;
+
+
+-- total no.of rows
+select 'daily_sales_fact'  as table_name, count(*) as row_count from integrate_db.golden_mart.daily_sales_fact
+union all select 'gross_margin_fact', count(*) from integrate_db.golden_mart.gross_margin_fact
+union all select 'fact_iot_sensor',   count(*) from integrate_db.golden_mart.fact_iot_sensor;
